@@ -10,7 +10,6 @@ Library to use [WalletConnect](https://walletconnect.org) with Swift.
 - Swift 4.2+
 
 # Usage
-## Sessions
 Parse scanned QR code:
 ```swift
 let scannedCode = "..."

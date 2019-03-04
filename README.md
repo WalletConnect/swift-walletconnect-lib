@@ -5,7 +5,7 @@ Library to use [WalletConnect](https://walletconnect.org) with Swift.
 
 ## Requirements
 
-- iOS 10.0+ / macOS 10.12+ / tvOS 10.0+ / watchOS 3.0+
+- iOS 10.0+
 - Xcode 10.1+
 - Swift 4.2+
 

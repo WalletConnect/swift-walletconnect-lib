@@ -71,7 +71,7 @@ func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive respo
 }
 ```
 
-Handle push with call request:
+Handle push:
 ```swift
 func handlePush(push: WCPushContent) {
  

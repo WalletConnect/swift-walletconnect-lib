@@ -55,7 +55,8 @@ public class WCInteractor {
         }
     }
     
-    public func approveCallRequest(callId: String, result: String, completion: @escaping SimpleRequestCompletion) {
+    public func
+        approveCallRequest(callId: String, result: String, completion: @escaping SimpleRequestCompletion) {
         
         let callStatus = "{\"data\":{\"result\":\"\(result)\",\"approved\":true}}"
         sendCallStatus(callId: callId, callStatus: callStatus, completion: completion)

@@ -16,10 +16,7 @@ Pod::Spec.new do |s|
   s.license      = "MIT"
   s.author             = { "Igor Shmakov" => "shmakoff.work@gmail.com" }
 
-  s.ios.deployment_target = '10.0'
-  s.osx.deployment_target = '10.12'
-  s.tvos.deployment_target = '10.0'
-  s.watchos.deployment_target = '3.0'
+  s.platform     = :ios, "10.0"
 
   s.source       = { :git => 'https://github.com/WalletConnect/swift-walletconnect-lib.git', :tag => s.version }
   s.source_files  = "WalletConnect/*.swift"

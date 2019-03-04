@@ -10,8 +10,8 @@ Pod::Spec.new do |s|
 
   s.name         = "WalletConnect"
   s.version      = "0.0.1"
-  s.summary      = "WalletConnect SDK for iOS and macOS"
-  s.description  = "WalletConnect SDK for iOS and macOS"
+  s.summary      = "WalletConnect SDK for iOS"
+  s.description  = "WalletConnect SDK for iOS"
   s.homepage     = "https://walletconnect.org"
   s.license      = "MIT"
   s.author             = { "Igor Shmakov" => "shmakoff.work@gmail.com" }

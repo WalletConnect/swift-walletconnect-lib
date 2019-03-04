@@ -9,7 +9,7 @@ Library to use [WalletConnect](https://walletconnect.org) with Swift.
 - Xcode 10.1+
 - Swift 4.2+
 
-# Installation
+## Installation
 WalletConnect can be added to your project using [CocoaPods](https://cocoapods.org/) by adding the following line to your Podfile:
 ```
 pod 'WalletConnect', '~> 0.0.1'

@@ -9,6 +9,12 @@ Library to use [WalletConnect](https://walletconnect.org) with Swift.
 - Xcode 10.1+
 - Swift 4.2+
 
+# Installation
+WalletConnect can be added to your project using [CocoaPods](https://cocoapods.org/) by adding the following line to your Podfile:
+```
+pod 'WalletConnect', '~> 0.0.1'
+```
+
 # Usage
 Parse scanned QR code:
 ```swift
@@ -110,10 +116,4 @@ let interactor = WCInteractor(session: session)
 interactor.rejectCallRequest(callId: push.callId) { response in 
     // Handle response
 }
-```
-
-# Installation
-WalletConnect can be added to your project using [CocoaPods](https://cocoapods.org/) by adding the following line to your Podfile:
-```
-pod 'WalletConnect', '~> 0.0.1'
 ```

@@ -1,119 +1,110 @@
-WalletConnect
+# WalletConnect
 ============
 
-Library to use [WalletConnect](https://walletconnect.org) with Swift.
+[WalletConnect](https://walletconnect.org/) Swift SDK, implements 1.0.0 websocket based protocol.
+
+### Demo video
+
+<a href="https://www.youtube.com/watch?v=sFZzzNDLd8Y" ><img src="https://img.youtube.com/vi/sFZzzNDLd8Y/maxresdefault.jpg" width="90%"></a>
 
 ## Requirements
 
-- iOS 10.0+
-- Xcode 10.1+
-- Swift 4.2+
+- iOS 11
+- Xcode 10.2
+- Swift 5
+
+## Features
+
+- [x] Connect and disconnect
+- [x] Approve / Reject / Kill session
+- [x] Approve and reject `eth_sign` / `personal_sign` / `eth_sendTransaction`
+- [x] Approve and reject `bnb_sign` (binance dex orders)
+
+Todo:
+
+- [ ] `eth_signTypedData`
+- [ ] session persistent / recovery
+- [ ] push notification (APNS)
+
+## Example
+
+To run the example project, clone the repo, and run `pod install` from the Example directory first.
 
 ## Installation
-WalletConnect can be added to your project using [CocoaPods](https://cocoapods.org/) by adding the following line to your Podfile:
-```
-pod 'WalletConnect', '~> 0.0.1'
+
+WalletConnect is available through [CocoaPods](https://cocoapods.org). To install
+it, simply add the following line to your Podfile:
+
+```ruby
+pod 'WalletConnect', git: 'https://github.com/WalletConnect/swift-walletconnect-lib', branch: 'master'
 ```
 
-# Usage
-Parse scanned QR code:
+## Usage
+
+parse session from scanned QR code:
+
 ```swift
-let scannedCode = "..."
-let parser = WCCodeParser()
-let result = parser.parse(string: scannedCode)
-        
-if case let .success(session) = result {
-    // Handle session
-} else {
-    // Bad QR
+let string = "wc:..."
+guard let session = WCSession.from(string: string) else {
+    // invalid session
+    return
+}
+// handle session
+```
+
+configure and handle incoming message:
+
+```swift
+let interactor = WCInteractor(session: session, meta: clientMeta)
+interactor.onSessionRequest = { [weak self] (id, peer) in
+    // ask for user consent
+}
+
+interactor.onDisconnect = { [weak self] (error) in
+    // handle disconnect
+}
+
+interactor.onEthSign = { [weak self] (id, params) in
+    // handle eth_sign and personal_sign
+}
+
+interactor.onEthSendTransaction = { [weak self] (id, transaction) in
+    // handle eth_sendTransaction
+}
+
+interactor.onBnbSign = { [weak self] (id, order) in
+    // handle bnb_sign
 }
 ```
 
-Approve session for account with device push token to receive notifications with requests:
+approve session
+
 ```swift
-let deviceToken = "..."
-let pushData = WCPushNotificationData(deviceToken: deviceToken, webhookUrl: "https://foo.io/walletconnect/push")
-let interactor = WCInteractor(session: session, pushData: pushData)
-interactor.approveSession(accounts: [account]) { result in          
-    if case let .success(response) = result {
-        // Session approved
-    } else {
-        // Something went wrong
-    }
-}
+interactor.approveSession(accounts: accounts, chainId: chainId).done {
+    print("<== approveSession done")
+}.cauterize()
 ```
 
-Reject session:
+approve request
+
 ```swift
-let interactor = WCInteractor(session: session)
-interactor.rejectSession(accounts: [account]) { result in          
-    if case let .success(response) = result {
-        // Session rejected
-    } else {
-        // Something went wrong
-    }
-}
-```
-## Call requests handling
-Register your app in the Apple Push Notification Service:
-```swift
-let center = UNUserNotificationCenter.current()
-center.requestAuthorization(options:[.badge, .alert, .sound]) { (granted, error) in
-    // Enable or disable features based on authorization.
-}
+interactor.approveRequest(id: id, result: result.hexString).done {
+    print("<== approveRequest done")
+}.cauterize()
 ```
 
-Configure push handling:
-```swift
-import UserNotifications
-UNUserNotificationCenter.current().delegate = self
+approve binance dex orders
 
-func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
-       
-    let userInfo = response.notification.request.content.userInfo
-    if let push = WCPushContent.fromUserInfo(userInfo) {
-        handlePush(push: push)
-    }
-}
+```swift
+interactor?.approveBnbOrder(id: id, signed: signed).done({ confirm in
+    print("<== approveBnbOrder", confirm)
+}).cauterize()
 ```
 
-Handle push:
-```swift
-func handlePush(push: WCPushContent) {
- 
-    guard let session = self.currentSession, push.sessionId == session.sessionId else { return }
-    
-    let interactor = WCInteractor(session: session)
-    interactor.fetchCallRequest(callId: push.callId) { response in
-        
-        guard case let .success(callRequest) = response else { return }
-        
-        switch callRequest {
-        case let .sendTransaction(transaction):
-            // Approve and sign or reject 
-        case let .signMessage(accountAddress, message):
-            // Approve and sign or reject
-        }
-    }
-}
-```
-Approve call request:
-```swift
-self.signTransaction(transaction) { hash in
+## Author
 
-    guard let hash = hash else { return }
-    
-    let interactor = WCInteractor(session: session)
-    interactor.approveCallRequest(callId: push.callId, result: hash) { response in 
-        // Handle response
-    }
-}
-```
+hewigovens
 
-Reject call request:
-```swift
-let interactor = WCInteractor(session: session)
-interactor.rejectCallRequest(callId: push.callId) { response in 
-    // Handle response
-}
-```
+## License
+
+WalletConnect is available under the MIT license. See the LICENSE file for more info.

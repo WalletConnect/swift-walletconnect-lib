@@ -2,214 +2,262 @@
 //  WCInteractor.swift
 //  WalletConnect
 //
-//  Created by Igor Shmakov on 22/02/2019.
-//  Copyright © 2019 Tokenary. All rights reserved.
+//  Created by Tao Xu on 3/29/19.
+//  Copyright © 2019 Trust. All rights reserved.
 //
 
 import Foundation
-import CryptoSwift
+import Starscream
+import PromiseKit
+
+public typealias SessionRequestClosure = (_ id: Int64, _ peer: WCPeerMeta) -> Void
+public typealias DisconnectClosure = (Error?) -> Void
+public typealias EthSignClosure = (_ id: Int64, _ params: [String]) -> Void
+public typealias EthSendTransactionClosure = (_ id: Int64, _ transaction: WCEthereumSendTransaction) -> Void
+public typealias BnbSignClosure = (_ id: Int64, _ order: WCBinanceOrder) -> Void
+
+func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
+    #if DEBUG
+    items.forEach {
+        Swift.print($0, separator: separator, terminator: terminator)
+    }
+    #endif
+}
 
 public class WCInteractor {
-    
-    private let session: WCSession
-    private let pushData: WCPushNotificationData?
-    private let client: WCClient
-    
-    public init(session: WCSession, pushData: WCPushNotificationData? = nil) {
-        
+    public let session: WCSession
+    public var connected: Bool {
+        return socket.isConnected
+    }
+
+    public let clientId: String
+    public let clientMeta: WCPeerMeta
+
+    // incoming event handlers
+    public var onSessionRequest: SessionRequestClosure?
+    public var onDisconnect: DisconnectClosure?
+    public var onEthSign: EthSignClosure?
+    public var onEthSendTransaction: EthSendTransactionClosure?
+    public var onBnbSign: BnbSignClosure?
+
+    // outgoing promise resolvers
+    var connectResolver: Resolver<Bool>?
+    var bnbTxConfirmResolvers: [Int64: Resolver<WCBinanceTxConfirmParam>] = [:]
+
+    private let socket: WebSocket
+    private var handshakeId: Int64 = -1
+    private var pingTimer: Timer?
+
+    private var peerId: String?
+    private var peerMeta: WCPeerMeta?
+
+    public init(session: WCSession, meta: WCPeerMeta) {
         self.session = session
-        self.pushData = pushData
-        self.client = WCClient()
+        self.clientId = (UIDevice.current.identifierForVendor ?? UUID()).description.lowercased()
+        self.clientMeta = meta
+        self.socket = WebSocket.init(url: session.bridge)
+
+        socket.onConnect = { [weak self] in self?.onConnect() }
+        socket.onDisconnect = { [weak self] error in self?.onDisconnect(error: error) }
+        socket.onText = { [weak self] text in self?.onReceiveMessage(text: text) }
+        socket.onPong = { _ in print("<== pong") }
+        socket.onData = { data in print("<== websocketDidReceiveData: \(data.toHexString())") }
     }
-    
-    public func approveSession(accounts: [String], completion: @escaping ObjectRequestCompletion<WCApproveSessionResponse>) {
-        
-        let accountsString = "[" + accounts.map { "\"\($0)\"" }.joined(separator: ",") + "]"
-        let sessionStatus = "{\"data\":{\"chainId\":1,\"accounts\":\(accountsString),\"approved\":true}}"
-        sendSessionStatus(pushData: pushData, sessionStatus: sessionStatus, completion: completion)
+
+    deinit {
+        disconnect()
     }
-    
-    public func rejectSession(completion: @escaping ObjectRequestCompletion<WCApproveSessionResponse>) {
-        
-        let sessionStatus = "{\"data\":{\"approved\":false}}"
-        sendSessionStatus(pushData: nil, sessionStatus: sessionStatus, completion: completion)
+
+    public func connect() -> Promise<Bool> {
+        if socket.isConnected {
+            return Promise.value(true)
+        }
+        socket.connect()
+        return Promise<Bool> { [weak self] seal in
+            self?.connectResolver = seal
+        }
     }
-    
-    public func killSession(completion: @escaping SimpleRequestCompletion) {
-        
-        let methodUrl = "\(session.bridgeUrl)/session/\(session.sessionId)"
-        self.client.killSession(url: methodUrl, completion: completion)
+
+    public func disconnect() {
+        pingTimer?.invalidate()
+        socket.disconnect()
+        connectResolver = nil
+        handshakeId = -1
     }
-    
-    public func fetchCallRequest(callId: String, completion: @escaping ObjectRequestCompletion<WCCallRequest>) {
-        
-        let methodUrl = "\(session.bridgeUrl)/session/\(session.sessionId)/call/\(callId)"
-        
-        self.client.fetchCallRequestData(url: methodUrl) { [weak self] apiResponse in
-            switch apiResponse {
-            case let .failure(error):
-                completion(.failure(error: error))
-            case let .success(encryptedPayload):
-                self?.decryptCallPayload(encryptedPayload: encryptedPayload, completion: completion)
+
+    public func approveSession(accounts: [String], chainId: Int) -> Promise<Void> {
+        guard handshakeId > 0 else {
+            return Promise(error: WCError.invalidSession)
+        }
+        let result = WCApproveSessionResponse(
+            approved: true,
+            chainId: chainId,
+            accounts: accounts,
+            peerId: clientId,
+            peerMeta: clientMeta
+        )
+        let response = JSONRPCResponse(id: handshakeId, result: result)
+        return encryptAndSend(data: response.encoded)
+    }
+
+    public func rejectSession(_ message: String = "Session Rejected") -> Promise<Void> {
+        guard handshakeId > 0 else {
+            return Promise(error: WCError.invalidSession)
+        }
+        let response = JSONRPCErrorResponse(id: handshakeId, error: JSONRPCError(code: -32000, message: message))
+        return encryptAndSend(data: response.encoded)
+    }
+
+    public func killSession() -> Promise<Void> {
+        let result = WCSessionUpdateParam(approved: false, chainId: nil, accounts: nil)
+        let response = JSONRPCRequest(id: generateId(), method: WCEvent.sessionUpdate.rawValue, params: [result])
+        return encryptAndSend(data: response.encoded)
+            .map { [weak self] in
+            self?.disconnect()
+        }
+    }
+
+    public func approveBnbOrder(id: Int64, signed: WCBinanceOrderSignature) -> Promise<WCBinanceTxConfirmParam> {
+        let result = signed.encodedString
+        return approveRequest(id: id, result: result)
+            .then { _ -> Promise<WCBinanceTxConfirmParam> in
+                return Promise { [weak self] seal in
+                    self?.bnbTxConfirmResolvers[id] = seal
+                }
+            }
+    }
+
+    public func approveRequest(id: Int64, result: String) -> Promise<Void> {
+        let response = JSONRPCResponse(id: id, result: result)
+        return encryptAndSend(data: response.encoded)
+    }
+
+    public func rejectRequest(id: Int64, message: String) -> Promise<Void> {
+        let response = JSONRPCErrorResponse(id: id, error: JSONRPCError(code: -32000, message: message))
+        return encryptAndSend(data: response.encoded)
+    }
+}
+
+extension WCInteractor {
+    private func subscribe(topic: String) {
+        let message = WCSocketMessage(topic: topic, type: .sub, payload: "")
+        let data = try! JSONEncoder().encode(message)
+        socket.write(data: data)
+        print("==> subscribe: \(String(data: data, encoding: .utf8)!)")
+    }
+
+    private func encryptAndSend(data: Data) -> Promise<Void> {
+        print("==> encrypt: \(String(data: data, encoding: .utf8)!) ")
+        let encoder = JSONEncoder()
+        let payload = try! WCEncryptor.encrypt(data: data, with: session.key)
+        let payloadString = encoder.encodeAsUTF8(payload)
+        let message = WCSocketMessage(topic: peerId ?? session.topic, type: .pub, payload: payloadString)
+        let data = message.encoded
+        return Promise { seal in
+            socket.write(data: data) {
+                print("==> sent \(String(data: data, encoding: .utf8)!) ")
+                seal.fulfill(())
             }
         }
     }
-    
-    public func
-        approveCallRequest(callId: String, result: String, completion: @escaping SimpleRequestCompletion) {
-        
-        let callStatus = "{\"data\":{\"result\":\"\(result)\",\"approved\":true}}"
-        sendCallStatus(callId: callId, callStatus: callStatus, completion: completion)
-    }
-    
-    public func rejectCallRequest(callId: String, completion: @escaping SimpleRequestCompletion) {
-        
-        let callStatus = "{\"data\":{\"approved\":false}}"
-        sendCallStatus(callId: callId, callStatus: callStatus, completion: completion)
-    }
-    
-    private func sendSessionStatus(pushData: WCPushNotificationData?, sessionStatus: String,
-                                   completion: @escaping ObjectRequestCompletion<WCApproveSessionResponse>) {
-        
-        guard let (data, hmac, iv) = try? encrypt(payload: sessionStatus) else {
-            completion(.failure(error: .unknown))
-            return
+
+    private func handleEvent(_ event: WCEvent, topic: String, decrypted: Data) {
+        do {
+            switch event {
+            // topic == session.topic
+            case .sessionRequest:
+                let request: JSONRPCRequest<[WCSessionRequestParam]> = try event.decode(decrypted)
+                guard let params = request.params.first else {
+                    throw WCError.badJSONRPCRequest
+                }
+                handshakeId = request.id
+                peerId = params.peerId
+                peerMeta = params.peerMeta
+                onSessionRequest?(request.id, params.peerMeta)
+            // topic == clientId
+            case .ethSign, .ethPersonalSign:
+                let request: JSONRPCRequest<[String]> = try event.decode(decrypted)
+                onEthSign?(request.id, request.params)
+            case .ethSendTransaction:
+                let request: JSONRPCRequest<[WCEthereumSendTransaction]> = try event.decode(decrypted)
+                guard request.params.count > 0 else {
+                    throw WCError.badJSONRPCRequest
+                }
+                onEthSendTransaction?(request.id, request.params[0])
+            case .bnbSign:
+                if let request: JSONRPCRequest<[WCBinanceTradeOrder]> = try? event.decode(decrypted) {
+                    onBnbSign?(request.id, request.params[0])
+                } else if let request: JSONRPCRequest<[WCBinanceCancelOrder]> = try? event.decode(decrypted) {
+                    onBnbSign?(request.id, request.params[0])
+                } else if let request: JSONRPCRequest<[WCBinanceTransferOrder]> = try? event.decode(decrypted) {
+                    onBnbSign?(request.id, request.params[0])
+                }
+                break
+            case .bnbTransactionConfirm:
+                let request: JSONRPCRequest<[WCBinanceTxConfirmParam]> = try event.decode(decrypted)
+                guard request.params.count > 0 else {
+                    throw WCError.badJSONRPCRequest
+                }
+                bnbTxConfirmResolvers[request.id]?.fulfill(request.params[0])
+                bnbTxConfirmResolvers[request.id] = nil
+            case .sessionUpdate:
+                let request: JSONRPCRequest<[WCSessionUpdateParam]> = try event.decode(decrypted)
+                guard let param = request.params.first else {
+                    throw WCError.badJSONRPCRequest
+                }
+                if param.approved == false {
+                    disconnect()
+                }
+            default:
+                break
+            }
+        } catch let error {
+            print("==> handleEvent error: \(error.localizedDescription)")
         }
-        
-        var payload: [String: Any?] = [
-            "encryptionPayload": [
-                "data": "\(data)",
-                "hmac": "\(hmac)",
-                "iv": "\(iv)"
-            ]
-        ]
-        
-        if let pushData = pushData {
-            payload["push"] = [
-                "type": "apn",
-                "token": "\(pushData.deviceToken)",
-                "webhook": "\(pushData.webhookUrl)"
-            ]
+    }
+}
+extension WCInteractor {
+
+    private func onConnect() {
+        print("<== websocketDidConnect")
+        pingTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true, block: { [weak socket] _ in
+            print("==> ping")
+            socket?.write(ping: Data())
+        })
+        subscribe(topic: session.topic)
+        subscribe(topic: clientId)
+        connectResolver?.fulfill(true)
+        connectResolver = nil
+    }
+
+    private func onDisconnect(error: Error?) {
+        print("<== websocketDidDisconnect, error: \(error.debugDescription)")
+        pingTimer?.invalidate()
+        if let error = error {
+            connectResolver?.reject(error)
         } else {
-            payload.updateValue(nil, forKey: "push")
+            connectResolver?.fulfill(false)
         }
-        
-        let methodUrl = "\(session.bridgeUrl)/session/\(session.sessionId)"
-        self.client.sendSessionStatus(url: methodUrl, payload: payload as [String: Any], completion: completion)
+        connectResolver = nil
+        onDisconnect?(error)
     }
-    
-    private func sendCallStatus(callId: String, callStatus: String, completion: @escaping SimpleRequestCompletion) {
-        
-        guard let (data, hmac, iv) = try? encrypt(payload: callStatus) else {
-            completion(.failure(error: .unknown))
-            return
-        }
-        
-        let payload = [
-            "encryptionPayload": [
-                "data": "\(data)",
-                "hmac": "\(hmac)",
-                "iv": "\(iv)"
-            ]
-        ]
-        
-        let methodUrl = "\(session.bridgeUrl)/call-status/\(callId)/new"
-        self.client.sendCallStatus(url: methodUrl, payload: payload, completion: completion)
-    }
-    
-    private func decryptCallPayload(encryptedPayload: WCEncryptedPayloadResponse,
-                                    completion: @escaping ObjectRequestCompletion<WCCallRequest>) {
-        guard
-            let decryptedString = try? decrypt(data: encryptedPayload.data, hmac: encryptedPayload.hmac,
-                                               iv: encryptedPayload.iv),
-            let decryptedData = decryptedString.data(using: .utf8),
-            let decryptedObject = (try? JSONSerialization.jsonObject(with: decryptedData, options: .allowFragments)) as? [String: Any],
-            let callData = decryptedObject["data"] as? [String: Any],
-            let method = callData["method"] as? String
-        else {
-            completion(.failure(error: .badServerResponse))
-            return
-        }
-        
-        switch method {
-        case "eth_sign":
-            
-            guard let params = callData["params"] as? [String], params.count == 2 else {
-                completion(.failure(error: .badServerResponse))
-                return
+
+    private func onReceiveMessage(text: String) {
+        print("<== receive: \(text)")
+        guard let (topic, payload) = WCEncryptionPayload.extract(text) else { return }
+        do {
+            let decrypted = try WCEncryptor.decrypt(payload: payload, with: session.key)
+            guard let json = try JSONSerialization.jsonObject(with: decrypted, options: [])
+                as? [String: Any] else {
+                throw WCError.badServerResponse
             }
-            completion(.success(result: WCCallRequest.signMessage(account: params[0], message: params[1])))
-            
-        case "eth_sendTransaction":
-            
-            guard let transaction = (callData["params"] as? [[String: Any]])?.first else {
-                completion(.failure(error: .badServerResponse))
-                return
+            print("<== decrypted: \(String(data: decrypted, encoding: .utf8)!)")
+            if let method = json["method"] as? String,
+                let event = WCEvent(rawValue: method) {
+                handleEvent(event, topic: topic, decrypted: decrypted)
             }
-            
-            completion(.success(result: WCCallRequest.sendTransaction(transaction: transaction)))
-            
-        default:
-            completion(.failure(error: .badServerResponse))
+        } catch let error {
+            print(error)
         }
-    }
-    
-    private func encrypt(payload: String) throws -> (data: String, hmac: String, iv: String) {
-        
-        let ivBytes = randomBytes(16)
-        let keyBytes = Data.fromHexString(session.symKey).bytes
-        let aesCipher = try AES(key: keyBytes, blockMode: CBC(iv: ivBytes))
-        let cipherInput = Array(payload.utf8)
-        let encryptedBytes = try aesCipher.encrypt(cipherInput)
-        
-        let data = Data(bytes: encryptedBytes).hexString
-        let iv = Data(bytes: ivBytes).hexString
-        let hmac = try makeHmac(payload: data, iv: iv, key: keyBytes)
-        return (data, hmac, iv)
-    }
-    
-    private func decrypt(data: String, hmac: String, iv: String) throws -> String {
-        
-        let keyBytes = Data.fromHexString(session.symKey).bytes
-        let computedHmac = try makeHmac(payload: data, iv: iv, key: keyBytes)
-        
-        guard computedHmac == hmac else {
-            throw WCError.badServerResponse
-        }
-        
-        let dataBytes = Data.fromHexString(data).bytes
-        let ivBytes = Data.fromHexString(iv).bytes
-        let aesCipher = try AES(key: keyBytes, blockMode: CBC(iv: ivBytes))
-        let decryptedBytes = try aesCipher.decrypt(dataBytes)
-        
-        guard let result = String(bytes: decryptedBytes, encoding: .utf8) else {
-            throw WCError.unknown
-        }
-        
-        return result
-    }
-    
-    func makeHmac(payload: String, iv: String, key: [UInt8]) throws -> String {
-        
-        guard
-            let payloadBytes = payload.data(using: .utf8)?.bytes,
-            let ivBytes = iv.data(using: .utf8)?.bytes
-        else {
-            throw WCError.unknown
-        }
-        
-        let bytes = payloadBytes + ivBytes
-        let hmacBytes = try HMAC(key: key, variant: .sha256).authenticate(bytes)
-        let hmac = Data(bytes: hmacBytes).hexString
-        return hmac
-    }
-    
-    private func randomBytes(_ n: Int) -> [UInt8] {
-     
-        var result = [UInt8]()
-        for _ in 1...n {
-            result.append(UInt8(arc4random_uniform(256)))
-        }
-        return result
     }
 }

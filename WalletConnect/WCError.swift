@@ -2,15 +2,15 @@
 //  WCError.swift
 //  WalletConnect
 //
-//  Created by Igor Shmakov on 22/02/2019.
-//  Copyright © 2019 Tokenary. All rights reserved.
+//  Created by Tao Xu on 3/30/19.
+//  Copyright © 2019 Trust. All rights reserved.
 //
 
 import Foundation
 
 public enum WCError: Error {
-    
     case badServerResponse
+    case badJSONRPCRequest
+    case invalidSession
     case unknown
-    case some(description: String)
 }

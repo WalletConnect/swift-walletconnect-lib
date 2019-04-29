@@ -22,6 +22,7 @@
 
 Todo:
 
+- [ ] Create Session
 - [ ] `eth_signTypedData`
 - [ ] session persistent / recovery
 - [ ] push notification (APNS)

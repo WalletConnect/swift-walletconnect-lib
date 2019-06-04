@@ -30,7 +30,7 @@ class ViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        let string = "wc:d282a614-a21f-4226-aca1-1db4ecfa2c08@1?bridge=https%3A%2F%2Fbridge.walletconnect.org&key=3890ad13ed17ce298fc7369eef7e6359864dc11c1ba5434e782c6277dc00d151"
+        let string = "wc:dad7a19e-d6e9-45fe-ba5f-f2116841d3c6@1?bridge=https%3A%2F%2Fbridge.walletconnect.org&key=6c56b56a08ff026f3bf56a30aa971fa4b1b3064563fe8d91755190c3037aea04"
 
         defaultAddress = CoinType.ethereum.deriveAddress(privateKey: privateKey)
         uriField.text = string
@@ -57,6 +57,12 @@ class ViewController: UIViewController {
         let accounts = [defaultAddress]
         let chainId = defaultChainId
 
+        interactor.onError = { [weak self] error in
+            let alert = UIAlertController(title: "Error", message: error.localizedDescription, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default, handler: nil))
+            self?.show(alert, sender: nil)
+        }
+
         interactor.onSessionRequest = { [weak self] (id, peer) in
             let message = [peer.description, peer.url].joined(separator: "\n")
             let alert = UIAlertController(title: peer.name, message: message, preferredStyle: .alert)
@@ -73,19 +79,19 @@ class ViewController: UIViewController {
             self?.connectionStatusUpdated(false)
         }
 
-        interactor.onEthSign = { [weak self] (id, params) in
-            let alert = UIAlertController(title: "eth_sign", message: params[1], preferredStyle: .alert)
+        interactor.onEthSign = { [weak self] (id, payload) in
+            let alert = UIAlertController(title: payload.method, message: payload.message, preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "Cancel", style: .destructive, handler: nil))
             alert.addAction(UIAlertAction(title: "Sign", style: .default, handler: { _ in
-                self?.signEth(id: id, message: params[1])
+                self?.signEth(id: id, payload: payload)
             }))
             self?.show(alert, sender: nil)
         }
 
-        interactor.onEthSendTransaction = { [weak self] (id, transaction) in
+        interactor.onEthTransaction = { [weak self] (id, event, transaction) in
             let data = try! JSONEncoder().encode(transaction)
             let message = String(data: data, encoding: .utf8)
-            let alert = UIAlertController(title: "eth_sendTransaction", message: message, preferredStyle: .alert)
+            let alert = UIAlertController(title: event.rawValue, message: message, preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "Reject", style: .destructive, handler: { _ in
                 self?.interactor?.rejectRequest(id: id, message: "I don't have ethers").cauterize()
             }))
@@ -109,13 +115,21 @@ class ViewController: UIViewController {
         }.cauterize()
     }
 
-    func signEth(id: Int64, message: String) {
-        guard let data = message.data(using: .utf8) else {
-            print("invalid message")
-            return
-        }
-        let prefix = "\u{19}Ethereum Signed Message:\n\(data.count)".data(using: .utf8)!
-        var result = privateKey.sign(digest: Hash.keccak256(data: prefix + data), curve: .secp256k1)!
+    func signEth(id: Int64, payload: WCEthereumSignPayload) {
+        let data: Data = {
+            switch payload {
+                case .sign(let data, _):
+                    return data
+                case .personalSign(let data, _):
+                    let prefix = "\u{19}Ethereum Signed Message:\n\(data)".data(using: .utf8)!
+                    return prefix + data
+                case .signTypeData(let data, _):
+                    // FIXME
+                    return data
+            }
+        }()
+
+        var result = privateKey.sign(digest: Hash.keccak256(data: data), curve: .secp256k1)!
         result[64] += 27
         self.interactor?.approveRequest(id: id, result: result.hexString).cauterize()
     }
@@ -163,7 +177,7 @@ class ViewController: UIViewController {
             print("invalid chainId")
             return
         }
-        guard EthereumAddress.isValidString(string: address) || TendermintAddress.isValidString(string: address) else {
+        guard EthereumAddress.isValidString(string: address) || CosmosAddress.isValidString(string: address) else {
             print("invalid eth or bnb address")
             return
         }

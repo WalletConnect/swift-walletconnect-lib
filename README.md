@@ -17,13 +17,13 @@
 
 - [x] Connect and disconnect
 - [x] Approve / Reject / Kill session
-- [x] Approve and reject `eth_sign` / `personal_sign` / `eth_sendTransaction`
+- [x] Approve and reject `eth_sign` / `personal_sign` / `eth_signTypedData`
+- [x] Approve and reject `eth_signTransaction` / `eth_sendTransaction`
 - [x] Approve and reject `bnb_sign` (binance dex orders)
 
 Todo:
 
 - [ ] Create Session
-- [ ] `eth_signTypedData`
 - [ ] session persistent / recovery
 - [ ] push notification (APNS)
 
@@ -65,12 +65,12 @@ interactor.onDisconnect = { [weak self] (error) in
     // handle disconnect
 }
 
-interactor.onEthSign = { [weak self] (id, params) in
-    // handle eth_sign and personal_sign
+interactor.onEthSign = { [weak self] (id, payload) in
+    // handle eth_sign, personal_sign, eth_signTypedData
 }
 
-interactor.onEthSendTransaction = { [weak self] (id, transaction) in
-    // handle eth_sendTransaction
+interactor.onEthTransaction = { [weak self] (id, event, transaction) in
+    // handle eth_signTransaction / eth_sendTransaction
 }
 
 interactor.onBnbSign = { [weak self] (id, order) in

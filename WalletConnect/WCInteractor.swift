@@ -12,9 +12,11 @@ import PromiseKit
 
 public typealias SessionRequestClosure = (_ id: Int64, _ peer: WCPeerMeta) -> Void
 public typealias DisconnectClosure = (Error?) -> Void
-public typealias EthSignClosure = (_ id: Int64, _ params: [String]) -> Void
-public typealias EthSendTransactionClosure = (_ id: Int64, _ transaction: WCEthereumSendTransaction) -> Void
+public typealias EthSignClosure = (_ id: Int64, _ payload: WCEthereumSignPayload) -> Void
+public typealias EthTransactionClosure = (_ id: Int64, _ event: WCEvent, _ transaction: WCEthereumTransaction) -> Void
 public typealias BnbSignClosure = (_ id: Int64, _ order: WCBinanceOrder) -> Void
+public typealias CustomRequestClosure = (_ id: Int64, _ request: [String: Any]) -> Void
+public typealias ErrorClosure = (Error) -> Void
 
 func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
     #if DEBUG
@@ -37,8 +39,10 @@ public class WCInteractor {
     public var onSessionRequest: SessionRequestClosure?
     public var onDisconnect: DisconnectClosure?
     public var onEthSign: EthSignClosure?
-    public var onEthSendTransaction: EthSendTransactionClosure?
+    public var onEthTransaction: EthTransactionClosure?
     public var onBnbSign: BnbSignClosure?
+    public var onCustomRequest: CustomRequestClosure?
+    public var onError: ErrorClosure?
 
     // outgoing promise resolvers
     var connectResolver: Resolver<Bool>?
@@ -161,58 +165,65 @@ extension WCInteractor {
         }
     }
 
-    private func handleEvent(_ event: WCEvent, topic: String, decrypted: Data) {
-        do {
-            switch event {
-            // topic == session.topic
-            case .sessionRequest:
-                let request: JSONRPCRequest<[WCSessionRequestParam]> = try event.decode(decrypted)
-                guard let params = request.params.first else {
-                    throw WCError.badJSONRPCRequest
-                }
-                handshakeId = request.id
-                peerId = params.peerId
-                peerMeta = params.peerMeta
-                onSessionRequest?(request.id, params.peerMeta)
-            // topic == clientId
-            case .ethSign, .ethPersonalSign:
-                let request: JSONRPCRequest<[String]> = try event.decode(decrypted)
-                onEthSign?(request.id, request.params)
-            case .ethSendTransaction:
-                let request: JSONRPCRequest<[WCEthereumSendTransaction]> = try event.decode(decrypted)
-                guard request.params.count > 0 else {
-                    throw WCError.badJSONRPCRequest
-                }
-                onEthSendTransaction?(request.id, request.params[0])
-            case .bnbSign:
-                if let request: JSONRPCRequest<[WCBinanceTradeOrder]> = try? event.decode(decrypted) {
-                    onBnbSign?(request.id, request.params[0])
-                } else if let request: JSONRPCRequest<[WCBinanceCancelOrder]> = try? event.decode(decrypted) {
-                    onBnbSign?(request.id, request.params[0])
-                } else if let request: JSONRPCRequest<[WCBinanceTransferOrder]> = try? event.decode(decrypted) {
-                    onBnbSign?(request.id, request.params[0])
-                }
-                break
-            case .bnbTransactionConfirm:
-                let request: JSONRPCRequest<[WCBinanceTxConfirmParam]> = try event.decode(decrypted)
-                guard request.params.count > 0 else {
-                    throw WCError.badJSONRPCRequest
-                }
-                bnbTxConfirmResolvers[request.id]?.fulfill(request.params[0])
-                bnbTxConfirmResolvers[request.id] = nil
-            case .sessionUpdate:
-                let request: JSONRPCRequest<[WCSessionUpdateParam]> = try event.decode(decrypted)
-                guard let param = request.params.first else {
-                    throw WCError.badJSONRPCRequest
-                }
-                if param.approved == false {
-                    disconnect()
-                }
-            default:
-                break
+    private func handleEvent(_ event: WCEvent, topic: String, decrypted: Data) throws {
+        switch event {
+        // topic == session.topic
+        case .sessionRequest:
+            let request: JSONRPCRequest<[WCSessionRequestParam]> = try event.decode(decrypted)
+            guard let params = request.params.first else {
+                throw WCError.badJSONRPCRequest
             }
-        } catch let error {
-            print("==> handleEvent error: \(error.localizedDescription)")
+            handshakeId = request.id
+            peerId = params.peerId
+            peerMeta = params.peerMeta
+            onSessionRequest?(request.id, params.peerMeta)
+        // topic == clientId
+        case .ethSign, .ethPersonalSign, .ethSignTypeData:
+            let request: JSONRPCRequest<[String]> = try event.decode(decrypted)
+            guard request.params.count > 1 else { throw WCError.badJSONRPCRequest }
+            let payload: WCEthereumSignPayload = {
+                if event == .ethSign {
+                    return .sign(data: Data(hex: request.params[1]), raw: request.params)
+                } else if event == .ethPersonalSign {
+                    return .personalSign(data: Data(hex: request.params[0]), raw: request.params)
+                } else if event == .ethSignTypeData {
+                    let data = request.params[0].data(using: .utf8) ?? Data()
+                    return .signTypeData(data: data, raw: request.params)
+                } else {
+                    fatalError()
+                }
+            }()
+            onEthSign?(request.id, payload)
+        case .ethSendTransaction, .ethSignTransaction:
+            let request: JSONRPCRequest<[WCEthereumTransaction]> = try event.decode(decrypted)
+            guard request.params.count > 0 else { throw WCError.badJSONRPCRequest }
+            onEthTransaction?(request.id, event, request.params[0])
+        case .bnbSign:
+            if let request: JSONRPCRequest<[WCBinanceTradeOrder]> = try? event.decode(decrypted) {
+                onBnbSign?(request.id, request.params[0])
+            } else if let request: JSONRPCRequest<[WCBinanceCancelOrder]> = try? event.decode(decrypted) {
+                onBnbSign?(request.id, request.params[0])
+            } else if let request: JSONRPCRequest<[WCBinanceTransferOrder]> = try? event.decode(decrypted) {
+                onBnbSign?(request.id, request.params[0])
+            }
+            break
+        case .bnbTransactionConfirm:
+            let request: JSONRPCRequest<[WCBinanceTxConfirmParam]> = try event.decode(decrypted)
+            guard request.params.count > 0 else {
+                throw WCError.badJSONRPCRequest
+            }
+            bnbTxConfirmResolvers[request.id]?.fulfill(request.params[0])
+            bnbTxConfirmResolvers[request.id] = nil
+        case .sessionUpdate:
+            let request: JSONRPCRequest<[WCSessionUpdateParam]> = try event.decode(decrypted)
+            guard let param = request.params.first else {
+                throw WCError.badJSONRPCRequest
+            }
+            if param.approved == false {
+                disconnect()
+            }
+        default:
+            break
         }
     }
 }
@@ -249,15 +260,19 @@ extension WCInteractor {
             let decrypted = try WCEncryptor.decrypt(payload: payload, with: session.key)
             guard let json = try JSONSerialization.jsonObject(with: decrypted, options: [])
                 as? [String: Any] else {
-                throw WCError.badServerResponse
+                throw WCError.badJSONRPCRequest
             }
             print("<== decrypted: \(String(data: decrypted, encoding: .utf8)!)")
-            if let method = json["method"] as? String,
-                let event = WCEvent(rawValue: method) {
-                handleEvent(event, topic: topic, decrypted: decrypted)
+            if let method = json["method"] as? String {
+                if let event = WCEvent(rawValue: method) {
+                    try handleEvent(event, topic: topic, decrypted: decrypted)
+                } else if let id = json["id"] as? Int64 {
+                    onCustomRequest?(id, json)
+                }
             }
         } catch let error {
-            print(error)
+            onError?(error)
+            print("==> onReceiveMessage error: \(error.localizedDescription)")
         }
     }
 }
